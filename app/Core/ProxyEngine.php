@@ -218,7 +218,7 @@ class ProxyEngine
      *
      * @return resource Stream handle for chunked output
      */
-    private function streamBody(ResponseInterface $response): resource
+    private function streamBody(ResponseInterface $response)
     {
         $stream = fopen('php://temp', 'r+');
         $chunkSize = (int) config('proxy.stream_chunk_size', 8192);
