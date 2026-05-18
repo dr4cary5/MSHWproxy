@@ -1,12 +1,7 @@
-name: Deploy MSHW-proxy
+ name: Deploy MSHW-proxy
 
 on:
   workflow_dispatch:
-    inputs:
-      log_level:
-        description: 'Log level (info/debug)'
-        required: false
-        default: 'info'
 
 jobs:
   deploy:
@@ -15,7 +10,6 @@ jobs:
     env:
       NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
       DASHBOARD_PASS: ${{ secrets.DASHBOARD_PASS }}
-      CF_STRATEGY: ${{ vars.CF_STRATEGY || 'auto' }}
       PROXY_PORT: 8080
       TTY_PORT: 7681
 
@@ -23,62 +17,111 @@ jobs:
       - name: 📦 Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 🛠️ Setup PHP & Extensions
+      - name: 🛠️ Setup PHP & Dependencies
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
           extensions: mbstring, curl, json, openssl, xml, zip
           coverage: none
 
-      - name: 📦 Install Dependencies
+      - name: 📦 Install Composer Deps
         run: composer install --no-dev --optimize-autoloader --quiet
 
-      - name: ⚙️ Generate Environment
+      - name: ⚙️ Prepare Environment
         run: |
-          cat > .env << EOF
-          NGROK_AUTH_TOKEN=$NGROK_AUTH_TOKEN
-          DASHBOARD_PASS=$DASHBOARD_PASS
-          CF_STRATEGY=$CF_STRATEGY
-          PROXY_PORT=$PROXY_PORT
-          TTY_PORT=$TTY_PORT
-          TTY_ENABLED=true
-          TTY_AUTH=$DASHBOARD_PASS
-          LOG_LEVEL=${{ github.event.inputs.log_level || 'info' }}
-          LOG_WS=true
-          EOF
+          echo "DASHBOARD_PASS=$DASHBOARD_PASS" > .env
+          echo "PROXY_PORT=$PROXY_PORT" >> .env
+          echo "TTY_PORT=$TTY_PORT" >> .env
+          echo "TTY_ENABLED=true" >> .env
+          echo "TTY_AUTH=$DASHBOARD_PASS" >> .env
 
-      - name: 🚀 Start Services
+      - name: 🚀 Start PHP Server
         run: |
-          chmod +x start.sh
-          ./start.sh &
-          echo "⏳ Waiting for services to initialize..."
-          sleep 15
+          nohup php -S 0.0.0.0:$PROXY_PORT -t public/ > /tmp/php.log 2>&1 &
+          echo "PHP PID: $!"
+          sleep 3
+          # Verify PHP is running
+          curl -s http://localhost:$PROXY_PORT/ > /dev/null && echo "✅ PHP Server OK" || echo "❌ PHP Server Failed"
 
-      - name: 🌐 Extract & Display URLs
+      - name: 🛠️ Install & Start ngrok (Official Method)
         run: |
-          PROXY_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[] | select(.config.addr == "8080") | .public_url' | head -1)
-          TTY_URL=$(curl -s http://127.0.0.1:4040/api/tunnels | jq -r '.tunnels[] | select(.config.addr == "7681") | .public_url' | head -1)
+          # 1. Install ngrok exactly like your sample
+          curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt update
+          sudo apt install -y ngrok
+
+          # 2. Configure Auth Token
+          ngrok config add-authtoken $NGROK_AUTH_TOKEN
+
+          # 3. Start Tunnels in Background
+          # We use 'ngrok http' directly for simplicity and reliability
+          nohup ngrok http $PROXY_PORT --log=stdout > /tmp/ngrok-proxy.log 2>&1 &
+          nohup ngrok http $TTY_PORT --log=stdout > /tmp/ngrok-tty.log 2>&1 &
+          
+          echo "⏳ Waiting for ngrok tunnels to establish..."
+          sleep 10
+
+          # 4. Debug: Check if ngrok process is alive
+          if pgrep -x "ngrok" > /dev/null; then
+            echo "✅ Ngrok process is running"
+          else
+            echo "❌ Ngrok process died. Logs:"
+            cat /tmp/ngrok-proxy.log
+            exit 1
+          fi
+
+      - name: 🌐 Extract & Show URLs
+        run: |
+          # Wait a bit more for API to be ready
+          sleep 5
+
+          # Debug: Check API response
+          echo "🔍 Checking ngrok API..."
+          API_RESP=$(curl -s http://127.0.0.1:4040/api/tunnels)
+          echo "API Response Preview: ${API_RESP:0:200}..."
+
+          # Extract URLs using jq
+          PROXY_URL=$(echo "$API_RESP" | jq -r '.tunnels[] | select(.config.addr == "'$PROXY_PORT'") | .public_url' | head -1)
+          TTY_URL=$(echo "$API_RESP" | jq -r '.tunnels[] | select(.config.addr == "'$TTY_PORT'") | .public_url' | head -1)
+
+          if [ -z "$PROXY_URL" ]; then
+            echo "❌ Failed to extract Proxy URL. Check logs."
+            cat /tmp/ngrok-proxy.log
+            exit 1
+          fi
 
           echo "========================================="
           echo "🎉 MSHW-proxy Deployed Successfully!"
           echo "========================================="
           echo "🌐 Proxy & Dashboard: $PROXY_URL"
           echo "🔧 Web Terminal (TTY): $TTY_URL"
-          echo "📋 Test: $PROXY_URL/?q=$(echo -n 'https://example.com' | base64)"
+          echo "📋 Test Link:"
+          echo "$PROXY_URL/?q=aHR0cHM6Ly9leGFtcGxlLmNvbQ=="
           echo "========================================="
 
-          echo "## 🎉 MSHW-proxy Deployed" >> $GITHUB_STEP_SUMMARY
-          echo "| Service | URL |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|-----|" >> $GITHUB_STEP_SUMMARY
-          echo "| 🌐 Proxy & Dashboard | \`$PROXY_URL\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| 🔧 Web Terminal | \`$TTY_URL\` |" >> $GITHUB_STEP_SUMMARY
+          # Save to GitHub Summary
+          echo "## 🎉 MSHW-proxy Live" >> $GITHUB_STEP_SUMMARY
+          echo "- **Proxy:** [Click Here]($PROXY_URL)" >> $GITHUB_STEP_SUMMARY
+          echo "- **TTY:** [Click Here]($TTY_URL)" >> $GITHUB_STEP_SUMMARY
 
       - name: ♻️ Keep-Alive Loop
         run: |
           echo "🔄 Starting health monitor..."
           while true; do
-            if ! pgrep -f "php -S" > /dev/null; then echo "⚠️ PHP restarted"; php -S 0.0.0.0:$PROXY_PORT -t public/ >> /tmp/mshw-proxy.log 2>&1 & fi
-            if ! pgrep -f "ngrok" > /dev/null; then echo "⚠️ ngrok restarted"; ngrok start --all >> /tmp/mshw-proxy.log 2>&1 & fi
+            # Restart PHP if down
+            if ! pgrep -f "php -S" > /dev/null; then
+              echo "⚠️ PHP restarted"
+              nohup php -S 0.0.0.0:$PROXY_PORT -t public/ > /tmp/php.log 2>&1 &
+            fi
+            
+            # Restart Ngrok if down
+            if ! pgrep -x "ngrok" > /dev/null; then
+              echo "⚠️ Ngrok restarted"
+              nohup ngrok http $PROXY_PORT --log=stdout > /tmp/ngrok-proxy.log 2>&1 &
+              nohup ngrok http $TTY_PORT --log=stdout > /tmp/ngrok-tty.log 2>&1 &
+            fi
+            
             echo "[$(date '+%H:%M:%S')] 💓 Heartbeat OK"
             sleep 300
           done
