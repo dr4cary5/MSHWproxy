@@ -22,7 +22,7 @@ class ProxyEngine
     public function __construct(CookieJar $cookieJar, array $config = [])
     {
         $this->cookieJar = $cookieJar;
-        $this->config = array_merge(config('proxy', []), $config);
+        $this->config = array_merge(\config('proxy', []), $config);
         
         // Initialize Symfony HTTP Client (HTTP/2, TLS 1.3, Async-native)
         $this->client = HttpClient::create([
@@ -86,7 +86,7 @@ class ProxyEngine
      */
     private function prepareHeaders(string $method, UriInterface $uri, array $incoming): array
     {
-        $cfConfig = config('cloudflare', []);
+        $cfConfig = \config('cloudflare', []);
         $headers = [
             'User-Agent' => $cfConfig['user_agents'][array_rand($cfConfig['user_agents'])],
             'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
@@ -181,16 +181,16 @@ class ProxyEngine
         string $method,
         array $options
     ): array {
-        $strategy = config('cloudflare.strategy', 'auto');
+        $strategy = \config('cloudflare.strategy', 'auto');
         
         // Strategy: cookie_inject + retry
         if (in_array($strategy, ['auto', 'cookie_inject'])) {
             // Retry with exponential backoff (cookies may have updated)
             $attempts = 0;
-            $backoff = (int) config('cloudflare.retry.backoff_base', 3);
-            $maxBackoff = (int) config('cloudflare.retry.backoff_max', 12);
+            $backoff = (int) \config('cloudflare.retry.backoff_base', 3);
+            $maxBackoff = (int) \config('cloudflare.retry.backoff_max', 12);
             
-            while ($attempts < (int) config('cloudflare.retry.max_attempts', 3)) {
+            while ($attempts < (int) \config('cloudflare.retry.max_attempts', 3)) {
                 sleep(min($backoff * (2 ** $attempts), $maxBackoff));
                 $result = $this->request($method, (string) $uri, $options);
                 if ($result['status'] !== 403 && $result['status'] !== 503) {
@@ -221,14 +221,14 @@ class ProxyEngine
     private function streamBody(ResponseInterface $response)
     {
         $stream = fopen('php://temp', 'r+');
-        $chunkSize = (int) config('proxy.stream_chunk_size', 8192);
+        $chunkSize = (int) \config('proxy.stream_chunk_size', 8192);
         
         foreach ($this->client->stream($response) as $chunk) {
             if ($chunk->isTimeout()) continue;
             if ($chunk->isFirst()) {
                 // First chunk: check content length limit
                 $length = (int) ($response->getHeaders(false)['content-length'][0] ?? 0);
-                $maxLen = (int) config('proxy.max_response_size', 52428800);
+                $maxLen = (int) \config('proxy.max_response_size', 52428800);
                 if ($length > 0 && $length > $maxLen) {
                     throw new \RuntimeException("Response too large: {$length} bytes");
                 }
