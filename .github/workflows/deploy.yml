@@ -1,4 +1,4 @@
- name: Deploy MSHW-proxy
+name: Deploy MSHW-proxy
 
 on:
   workflow_dispatch:
@@ -27,6 +27,9 @@ jobs:
       - name: 📦 Install Composer Deps
         run: composer install --no-dev --optimize-autoloader --quiet
 
+      - name: 📦 Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: ⚙️ Prepare Environment
         run: |
           echo "DASHBOARD_PASS=$DASHBOARD_PASS" > .env
@@ -40,29 +43,23 @@ jobs:
           nohup php -S 0.0.0.0:$PROXY_PORT -t public/ > /tmp/php.log 2>&1 &
           echo "PHP PID: $!"
           sleep 3
-          # Verify PHP is running
-          curl -s http://localhost:$PROXY_PORT/ > /dev/null && echo "✅ PHP Server OK" || echo "❌ PHP Server Failed"
+          curl -s http://localhost:$PROXY_PORT/ > /dev/null && echo "✅ PHP Server OK" || (echo "❌ PHP Server Failed" && exit 1)
 
       - name: 🛠️ Install & Start ngrok (Official Method)
         run: |
-          # 1. Install ngrok exactly like your sample
           curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
           echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" | sudo tee /etc/apt/sources.list.d/ngrok.list
           sudo apt update
           sudo apt install -y ngrok
 
-          # 2. Configure Auth Token
-          ngrok config add-authtoken $NGROK_AUTH_TOKEN
+          ngrok config add-authtoken "$NGROK_AUTH_TOKEN"
 
-          # 3. Start Tunnels in Background
-          # We use 'ngrok http' directly for simplicity and reliability
           nohup ngrok http $PROXY_PORT --log=stdout > /tmp/ngrok-proxy.log 2>&1 &
           nohup ngrok http $TTY_PORT --log=stdout > /tmp/ngrok-tty.log 2>&1 &
           
           echo "⏳ Waiting for ngrok tunnels to establish..."
           sleep 10
 
-          # 4. Debug: Check if ngrok process is alive
           if pgrep -x "ngrok" > /dev/null; then
             echo "✅ Ngrok process is running"
           else
@@ -73,24 +70,17 @@ jobs:
 
       - name: 🌐 Extract & Show URLs
         run: |
-          # Wait a bit more for API to be ready
           sleep 5
-
-          # Debug: Check API response
           echo "🔍 Checking ngrok API..."
           API_RESP=$(curl -s http://127.0.0.1:4040/api/tunnels)
           echo "API Response Preview: ${API_RESP:0:200}..."
-
-          # Extract URLs using jq
-          PROXY_URL=$(echo "$API_RESP" | jq -r '.tunnels[] | select(.config.addr == "'$PROXY_PORT'") | .public_url' | head -1)
-          TTY_URL=$(echo "$API_RESP" | jq -r '.tunnels[] | select(.config.addr == "'$TTY_PORT'") | .public_url' | head -1)
-
+          PROXY_URL=$(echo "$API_RESP" | jq -r --arg port "$PROXY_PORT" '.tunnels[] | select(.config.addr|test($port+"$")) | .public_url' | head -1)
+          TTY_URL=$(echo "$API_RESP" | jq -r --arg port "$TTY_PORT" '.tunnels[] | select(.config.addr|test($port+"$")) | .public_url' | head -1)
           if [ -z "$PROXY_URL" ]; then
             echo "❌ Failed to extract Proxy URL. Check logs."
             cat /tmp/ngrok-proxy.log
             exit 1
           fi
-
           echo "========================================="
           echo "🎉 MSHW-proxy Deployed Successfully!"
           echo "========================================="
@@ -99,8 +89,6 @@ jobs:
           echo "📋 Test Link:"
           echo "$PROXY_URL/?q=aHR0cHM6Ly9leGFtcGxlLmNvbQ=="
           echo "========================================="
-
-          # Save to GitHub Summary
           echo "## 🎉 MSHW-proxy Live" >> $GITHUB_STEP_SUMMARY
           echo "- **Proxy:** [Click Here]($PROXY_URL)" >> $GITHUB_STEP_SUMMARY
           echo "- **TTY:** [Click Here]($TTY_URL)" >> $GITHUB_STEP_SUMMARY
@@ -109,19 +97,15 @@ jobs:
         run: |
           echo "🔄 Starting health monitor..."
           while true; do
-            # Restart PHP if down
             if ! pgrep -f "php -S" > /dev/null; then
               echo "⚠️ PHP restarted"
               nohup php -S 0.0.0.0:$PROXY_PORT -t public/ > /tmp/php.log 2>&1 &
             fi
-            
-            # Restart Ngrok if down
             if ! pgrep -x "ngrok" > /dev/null; then
               echo "⚠️ Ngrok restarted"
               nohup ngrok http $PROXY_PORT --log=stdout > /tmp/ngrok-proxy.log 2>&1 &
               nohup ngrok http $TTY_PORT --log=stdout > /tmp/ngrok-tty.log 2>&1 &
             fi
-            
             echo "[$(date '+%H:%M:%S')] 💓 Heartbeat OK"
             sleep 300
           done
